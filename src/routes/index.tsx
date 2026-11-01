@@ -1,6 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Lock, Radio, Search, Users, X } from "lucide-react";
+import { Radio, Search, Users, X } from "lucide-react";
 import { getAllServerStatuses } from "@/lib/query.functions";
 
 type Snapshot = Awaited<ReturnType<typeof getAllServerStatuses>>[number];
@@ -9,38 +9,6 @@ const SERVERS = [
   { id: "254", label: "GreenStone", host: "51.38.143.254", port: 7777 },
   { id: "253", label: "GreenStone Beta", host: "51.38.143.253", port: 7777 },
 ] as const;
-
-type HistoryPoint = { t: number; players: number; online: boolean };
-type RangeKey = "1h" | "24h" | "7d";
-
-const RANGE_MS: Record<RangeKey, number> = {
-  "1h": 60 * 60 * 1000,
-  "24h": 24 * 60 * 60 * 1000,
-  "7d": 7 * 24 * 60 * 60 * 1000,
-};
-
-const HISTORY_KEY = "gs-player-history-v1";
-const MAX_POINTS = 12_000; // ~7d at 1 sample / 50s
-const SAMPLE_EVERY_MS = 15_000;
-
-function loadHistory(): Record<string, HistoryPoint[]> {
-  try {
-    const raw = localStorage.getItem(HISTORY_KEY);
-    if (!raw) return {};
-    const parsed = JSON.parse(raw) as Record<string, HistoryPoint[]>;
-    return parsed && typeof parsed === "object" ? parsed : {};
-  } catch {
-    return {};
-  }
-}
-
-function saveHistory(h: Record<string, HistoryPoint[]>) {
-  try {
-    localStorage.setItem(HISTORY_KEY, JSON.stringify(h));
-  } catch {
-    /* quota */
-  }
-}
 
 export const Route = createFileRoute("/")({
   loader: () => getAllServerStatuses(),
@@ -67,20 +35,12 @@ function Home() {
   const [snapshots, setSnapshots] = useState<Snapshot[]>(initial);
   const [failed, setFailed] = useState<Record<string, boolean>>({});
   const [search, setSearch] = useState("");
-  const [range, setRange] = useState<RangeKey>("1h");
-  const [history, setHistory] = useState<Record<string, HistoryPoint[]>>({});
   const shown = useRef<Record<string, Snapshot>>(
     Object.fromEntries(initial.map((s) => [`${s.host}:${s.port}`, s])),
   );
   const last = useRef<Record<string, string>>(
     Object.fromEntries(initial.map((s) => [`${s.host}:${s.port}`, fingerprint(s)])),
   );
-  const lastSampleAt = useRef<Record<string, number>>({});
-
-  // hydrate history from localStorage
-  useEffect(() => {
-    setHistory(loadHistory());
-  }, []);
 
   useEffect(() => {
     let alive = true;
@@ -106,33 +66,6 @@ function Home() {
         });
         setSnapshots(nextSnapshots);
         setFailed(nextFailed);
-
-        // sample history (throttled)
-        const now = Date.now();
-        setHistory((prev) => {
-          let changed = false;
-          const next = { ...prev };
-          for (const snap of nextSnapshots) {
-            const key = `${snap.host}:${snap.port}`;
-            const lastAt = lastSampleAt.current[key] ?? 0;
-            if (now - lastAt < SAMPLE_EVERY_MS) continue;
-            lastSampleAt.current[key] = now;
-            const points = next[key] ? [...next[key]] : [];
-            points.push({
-              t: now,
-              players: snap.online ? snap.players : 0,
-              online: snap.online,
-            });
-            // drop older than 7d + buffer
-            const cutoff = now - RANGE_MS["7d"] - 60_000;
-            while (points.length && points[0]!.t < cutoff) points.shift();
-            while (points.length > MAX_POINTS) points.shift();
-            next[key] = points;
-            changed = true;
-          }
-          if (changed) saveHistory(next);
-          return changed ? next : prev;
-        });
       } catch {
         if (!alive) return;
         setFailed((prev) => {
@@ -170,12 +103,6 @@ function Home() {
         String(p.score).includes(q),
     );
   }, [data.playerList, search]);
-
-  const chartPoints = useMemo(() => {
-    const all = history[key] ?? [];
-    const cutoff = Date.now() - RANGE_MS[range];
-    return all.filter((p) => p.t >= cutoff);
-  }, [history, key, range]);
 
   return (
     <main className="mx-auto min-h-screen max-w-3xl px-4 py-8 sm:px-6 sm:py-12">
@@ -264,30 +191,6 @@ function Home() {
         </dl>
       </section>
 
-      {/* History chart */}
-      <section className="mt-4 rounded-xl border border-line bg-surface p-5">
-        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-          <h2 className="text-sm font-medium">Player history</h2>
-          <div className="flex gap-1 rounded-lg border border-line bg-surface-2 p-0.5">
-            {(["1h", "24h", "7d"] as RangeKey[]).map((r) => (
-              <button
-                key={r}
-                type="button"
-                onClick={() => setRange(r)}
-                className={
-                  range === r
-                    ? "rounded-md bg-surface px-2.5 py-1 text-xs font-medium text-fg"
-                    : "rounded-md px-2.5 py-1 text-xs font-medium text-muted hover:text-fg"
-                }
-              >
-                {r}
-              </button>
-            ))}
-          </div>
-        </div>
-        <PlayerChart points={chartPoints} maxPlayers={data.maxPlayers || 100} range={range} />
-      </section>
-
       <section className="mt-4 overflow-hidden rounded-xl border border-line bg-surface">
         <div className="flex flex-col gap-3 border-b border-line px-5 py-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex items-center justify-between gap-3">
@@ -369,95 +272,6 @@ function Home() {
         )}
       </section>
     </main>
-  );
-}
-
-function PlayerChart({
-  points,
-  maxPlayers,
-  range,
-}: {
-  points: HistoryPoint[];
-  maxPlayers: number;
-  range: RangeKey;
-}) {
-  const w = 640;
-  const h = 140;
-  const padX = 8;
-  const padY = 12;
-
-  if (points.length < 2) {
-    return (
-      <div className="flex h-[140px] items-center justify-center rounded-lg bg-surface-2 text-sm text-muted">
-        Collecting data… keep this page open to build history.
-      </div>
-    );
-  }
-
-  const now = Date.now();
-  const span = RANGE_MS[range];
-  const t0 = now - span;
-  const yMax = Math.max(maxPlayers, ...points.map((p) => p.players), 1);
-
-  const coords = points.map((p) => {
-    const x = padX + ((p.t - t0) / span) * (w - padX * 2);
-    const y = h - padY - (p.players / yMax) * (h - padY * 2);
-    return { x, y, ...p };
-  });
-
-  const line = coords.map((c, i) => `${i === 0 ? "M" : "L"}${c.x.toFixed(1)},${c.y.toFixed(1)}`).join(" ");
-  const area =
-    line +
-    ` L${coords[coords.length - 1]!.x.toFixed(1)},${(h - padY).toFixed(1)}` +
-    ` L${coords[0]!.x.toFixed(1)},${(h - padY).toFixed(1)} Z`;
-
-  const peak = Math.max(...points.map((p) => p.players));
-  const offlineMs = points.reduce((acc, p, i) => {
-    if (p.online) return acc;
-    const nextT = points[i + 1]?.t ?? now;
-    return acc + (nextT - p.t);
-  }, 0);
-  const uptimePct = Math.max(0, Math.min(100, 100 - (offlineMs / span) * 100));
-
-  return (
-    <div>
-      <svg viewBox={`0 0 ${w} ${h}`} className="h-[140px] w-full" preserveAspectRatio="none">
-        <defs>
-          <linearGradient id="fillOk" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor="#3dd68c" stopOpacity="0.35" />
-            <stop offset="100%" stopColor="#3dd68c" stopOpacity="0" />
-          </linearGradient>
-        </defs>
-        {/* grid lines */}
-        {[0.25, 0.5, 0.75].map((f) => {
-          const y = padY + (1 - f) * (h - padY * 2);
-          return (
-            <line
-              key={f}
-              x1={padX}
-              x2={w - padX}
-              y1={y}
-              y2={y}
-              stroke="#222"
-              strokeWidth="1"
-            />
-          );
-        })}
-        <path d={area} fill="url(#fillOk)" />
-        <path d={line} fill="none" stroke="#3dd68c" strokeWidth="2" strokeLinejoin="round" />
-      </svg>
-      <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted">
-        <span>
-          Peak <span className="font-mono text-fg">{peak}</span>
-        </span>
-        <span>
-          Uptime ~<span className="font-mono text-fg">{uptimePct.toFixed(0)}%</span>
-        </span>
-        <span>
-          Samples <span className="font-mono text-fg">{points.length}</span>
-        </span>
-      </div>
-    </div>
   );
 }
 
