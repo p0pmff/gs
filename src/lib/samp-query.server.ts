@@ -19,25 +19,36 @@ export type SampSnapshot = {
   playerList: SampPlayer[];
   queriedAt: number;
   source: "udp";
+  host: string;
+  port: number;
 };
 
-const HOST = "51.38.143.254";
-const PORT = 7777;
+export type ServerTarget = {
+  id: string;
+  label: string;
+  host: string;
+  port: number;
+};
 
-function packet(opcode: string) {
-  const ip = HOST.split(".").map(Number);
+export const SERVERS: ServerTarget[] = [
+  { id: "254", label: "GreenStone", host: "51.38.143.254", port: 7777 },
+  { id: "253", label: "GreenStone #2", host: "51.38.143.253", port: 7777 },
+];
+
+function packet(host: string, port: number, opcode: string) {
+  const ip = host.split(".").map(Number);
   const buf = Buffer.alloc(11);
   buf.write("SAMP", 0);
   buf[4] = ip[0]!;
   buf[5] = ip[1]!;
   buf[6] = ip[2]!;
   buf[7] = ip[3]!;
-  buf.writeUInt16LE(PORT, 8);
+  buf.writeUInt16LE(port, 8);
   buf[10] = opcode.charCodeAt(0);
   return buf;
 }
 
-function ask(opcode: string, timeoutMs: number): Promise<Buffer> {
+function ask(host: string, port: number, opcode: string, timeoutMs: number): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const sock = dgram.createSocket("udp4");
     const timer = setTimeout(() => {
@@ -58,7 +69,7 @@ function ask(opcode: string, timeoutMs: number): Promise<Buffer> {
       sock.close();
       resolve(msg);
     });
-    sock.send(packet(opcode), PORT, HOST);
+    sock.send(packet(host, port, opcode), port, host);
   });
 }
 
@@ -134,16 +145,29 @@ function parseRules(buf: Buffer): Record<string, string> {
   return rules;
 }
 
-let inflight: Promise<SampSnapshot> | null = null;
-let cached: { at: number; data: SampSnapshot } | null = null;
-let lastGood: SampSnapshot | null = null;
+type CacheEntry = {
+  inflight: Promise<SampSnapshot> | null;
+  cached: { at: number; data: SampSnapshot } | null;
+  lastGood: SampSnapshot | null;
+};
 
-async function queryFresh(): Promise<SampSnapshot> {
-  const infoBuf = await ask("i", 2500);
+const caches = new Map<string, CacheEntry>();
+
+function getCache(key: string): CacheEntry {
+  let entry = caches.get(key);
+  if (!entry) {
+    entry = { inflight: null, cached: null, lastGood: null };
+    caches.set(key, entry);
+  }
+  return entry;
+}
+
+async function queryFresh(host: string, port: number): Promise<SampSnapshot> {
+  const infoBuf = await ask(host, port, "i", 2500);
   const info = parseInfo(infoBuf);
   const [playersBuf, rulesBuf] = await Promise.all([
-    info.players > 0 ? ask("d", 2500).catch(() => null) : Promise.resolve(null),
-    ask("r", 1500).catch(() => null),
+    info.players > 0 ? ask(host, port, "d", 2500).catch(() => null) : Promise.resolve(null),
+    ask(host, port, "r", 1500).catch(() => null),
   ]);
   const rules = rulesBuf ? parseRules(rulesBuf) : {};
   const playerList = playersBuf ? parsePlayers(playersBuf) : [];
@@ -160,33 +184,57 @@ async function queryFresh(): Promise<SampSnapshot> {
     playerList,
     queriedAt: Date.now(),
     source: "udp",
+    host,
+    port,
   };
 }
 
-export async function querySamp(): Promise<SampSnapshot> {
+export async function querySamp(host: string, port: number): Promise<SampSnapshot> {
+  const key = `${host}:${port}`;
+  const entry = getCache(key);
   const now = Date.now();
-  if (cached && now - cached.at < 900) return cached.data;
-  if (!inflight) {
-    inflight = (async () => {
+  if (entry.cached && now - entry.cached.at < 900) return entry.cached.data;
+  if (!entry.inflight) {
+    entry.inflight = (async () => {
       try {
-        const data = await queryFresh();
-        lastGood = data;
-        cached = { at: Date.now(), data };
+        const data = await queryFresh(host, port);
+        entry.lastGood = data;
+        entry.cached = { at: Date.now(), data };
         return data;
       } catch (err) {
         try {
-          const data = await queryFresh();
-          lastGood = data;
-          cached = { at: Date.now(), data };
+          const data = await queryFresh(host, port);
+          entry.lastGood = data;
+          entry.cached = { at: Date.now(), data };
           return data;
         } catch {
-          if (lastGood && Date.now() - lastGood.queriedAt < 20_000) return lastGood;
+          if (entry.lastGood && Date.now() - entry.lastGood.queriedAt < 20_000) {
+            return entry.lastGood;
+          }
           throw err;
         }
       }
     })().finally(() => {
-      inflight = null;
+      entry.inflight = null;
     });
   }
-  return inflight;
+  return entry.inflight;
+}
+
+export function offlineSnapshot(host: string, port: number, fallbackName = "GreenStone"): SampSnapshot {
+  return {
+    online: false,
+    hostname: fallbackName,
+    gamemode: "—",
+    language: "—",
+    version: null,
+    password: false,
+    players: 0,
+    maxPlayers: 0,
+    playerList: [],
+    queriedAt: Date.now(),
+    source: "udp",
+    host,
+    port,
+  };
 }

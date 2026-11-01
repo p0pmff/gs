@@ -1,22 +1,15 @@
 import { createServerFn } from "@tanstack/react-start";
 
-export const getServerStatus = createServerFn({ method: "GET" }).handler(async () => {
-  const { querySamp } = await import("./samp-query.server");
-  try {
-    return await querySamp();
-  } catch {
-    return {
-      online: false as const,
-      hostname: "GreenStone",
-      gamemode: "—",
-      language: "—",
-      version: null as string | null,
-      password: false,
-      players: 0,
-      maxPlayers: 0,
-      playerList: [] as { id: number; name: string; score: number; ping: number }[],
-      queriedAt: Date.now(),
-      source: "udp" as const,
-    };
-  }
+export const getAllServerStatuses = createServerFn({ method: "GET" }).handler(async () => {
+  const { SERVERS, querySamp, offlineSnapshot } = await import("./samp-query.server");
+  const results = await Promise.all(
+    SERVERS.map(async (s) => {
+      try {
+        return await querySamp(s.host, s.port);
+      } catch {
+        return offlineSnapshot(s.host, s.port, s.label);
+      }
+    }),
+  );
+  return results;
 });

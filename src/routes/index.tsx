@@ -1,12 +1,17 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useRef, useState } from "react";
 import { Lock, Radio, RefreshCw, Users } from "lucide-react";
-import { getServerStatus } from "@/lib/query.functions";
+import { getAllServerStatuses } from "@/lib/query.functions";
 
-type Snapshot = Awaited<ReturnType<typeof getServerStatus>>;
+type Snapshot = Awaited<ReturnType<typeof getAllServerStatuses>>[number];
+
+const SERVERS = [
+  { id: "254", label: "GreenStone", host: "51.38.143.254", port: 7777 },
+  { id: "253", label: "GreenStone #2", host: "51.38.143.253", port: 7777 },
+] as const;
 
 export const Route = createFileRoute("/")({
-  loader: () => getServerStatus(),
+  loader: () => getAllServerStatuses(),
   component: Home,
 });
 
@@ -26,33 +31,50 @@ function fingerprint(s: Snapshot) {
 
 function Home() {
   const initial = Route.useLoaderData();
-  const [data, setData] = useState<Snapshot>(initial);
-  const [failed, setFailed] = useState(false);
+  const [activeId, setActiveId] = useState<string>(SERVERS[0].id);
+  const [snapshots, setSnapshots] = useState<Snapshot[]>(initial);
+  const [failed, setFailed] = useState<Record<string, boolean>>({});
   const [tick, setTick] = useState(0);
-  const shown = useRef(initial);
-  const last = useRef(fingerprint(initial));
+  const shown = useRef<Record<string, Snapshot>>(
+    Object.fromEntries(initial.map((s) => [`${s.host}:${s.port}`, s])),
+  );
+  const last = useRef<Record<string, string>>(
+    Object.fromEntries(initial.map((s) => [`${s.host}:${s.port}`, fingerprint(s)])),
+  );
 
   useEffect(() => {
     let alive = true;
     const pull = async () => {
       try {
-        const next = await getServerStatus();
+        const nextList = await getAllServerStatuses();
         if (!alive) return;
-        if (!next.online && shown.current.online) {
-          setTick((n) => n + 1);
-          return;
-        }
-        const fp = fingerprint(next);
-        if (fp !== last.current) {
-          last.current = fp;
-          shown.current = next;
-          setData(next);
-        }
-        setFailed(!next.online);
+        const nextFailed: Record<string, boolean> = {};
+        const nextSnapshots = nextList.map((next) => {
+          const key = `${next.host}:${next.port}`;
+          const prevShown = shown.current[key];
+          if (!next.online && prevShown?.online) {
+            // keep previous online view briefly while counting the tick
+            nextFailed[key] = false;
+            return prevShown;
+          }
+          const fp = fingerprint(next);
+          if (fp !== last.current[key]) {
+            last.current[key] = fp;
+            shown.current[key] = next;
+          }
+          nextFailed[key] = !next.online;
+          return shown.current[key] ?? next;
+        });
+        setSnapshots(nextSnapshots);
+        setFailed(nextFailed);
         setTick((n) => n + 1);
       } catch {
         if (!alive) return;
-        setFailed(true);
+        setFailed((prev) => {
+          const all: Record<string, boolean> = { ...prev };
+          for (const s of SERVERS) all[`${s.host}:${s.port}`] = true;
+          return all;
+        });
       }
     };
     void pull();
@@ -63,23 +85,70 @@ function Home() {
     };
   }, []);
 
+  const activeServer = SERVERS.find((s) => s.id === activeId) ?? SERVERS[0];
+  const data =
+    snapshots.find((s) => s.host === activeServer.host && s.port === activeServer.port) ??
+    snapshots[0];
+  const key = `${data.host}:${data.port}`;
+  const isFailed = failed[key] ?? !data.online;
+
   const ratio =
     data && data.maxPlayers > 0 ? Math.min(100, (data.players / data.maxPlayers) * 100) : 0;
 
   return (
     <main className="mx-auto min-h-screen max-w-3xl px-4 py-8 sm:px-6 sm:py-12">
-      <header className="mb-8 flex items-end justify-between gap-4">
-        <div>
-          <p className="font-mono text-xs tracking-[0.18em] text-muted uppercase">
-            SA-MP live query
-          </p>
-          <h1 className="mt-2 text-2xl font-semibold tracking-tight sm:text-3xl">
-            {data.hostname}
-          </h1>
-          <p className="mt-1 font-mono text-sm text-muted">51.38.143.254:7777</p>
-        </div>
-        <StatusPill online={data.online && !failed} />
+      <header className="mb-6">
+        <p className="font-mono text-xs tracking-[0.18em] text-muted uppercase">
+          SA-MP live query
+        </p>
+        <h1 className="mt-2 text-2xl font-semibold tracking-tight sm:text-3xl">
+          GreenStone servers
+        </h1>
       </header>
+
+      {/* Tabs */}
+      <div className="mb-6 flex gap-1 rounded-xl border border-line bg-surface-2 p-1">
+        {SERVERS.map((s) => {
+          const snap = snapshots.find((x) => x.host === s.host && x.port === s.port);
+          const online = snap?.online && !(failed[`${s.host}:${s.port}`] ?? false);
+          const isActive = activeId === s.id;
+          return (
+            <button
+              key={s.id}
+              type="button"
+              onClick={() => setActiveId(s.id)}
+              className={
+                isActive
+                  ? "flex flex-1 items-center justify-center gap-2 rounded-lg bg-surface px-3 py-2.5 text-sm font-medium text-fg shadow-sm"
+                  : "flex flex-1 items-center justify-center gap-2 rounded-lg px-3 py-2.5 text-sm font-medium text-muted hover:text-fg"
+              }
+            >
+              <span
+                className={
+                  online
+                    ? "size-1.5 shrink-0 rounded-full bg-ok"
+                    : "size-1.5 shrink-0 rounded-full bg-bad"
+                }
+                aria-hidden
+              />
+              <span className="truncate">{s.label}</span>
+              <span className="hidden font-mono text-xs text-muted sm:inline">
+                :{s.port}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+
+      <div className="mb-4 flex items-end justify-between gap-4">
+        <div>
+          <h2 className="text-xl font-semibold tracking-tight">{data.hostname}</h2>
+          <p className="mt-1 font-mono text-sm text-muted">
+            {data.host}:{data.port}
+          </p>
+        </div>
+        <StatusPill online={data.online && !isFailed} />
+      </div>
 
       <section className="rounded-xl border border-line bg-surface p-5">
         <div className="flex items-baseline justify-between gap-3">
@@ -143,7 +212,9 @@ function Home() {
                   <tr key={`${p.id}-${p.name}`} className="border-t border-line">
                     <td className="px-5 py-2.5 font-mono text-muted">{p.id}</td>
                     <td className="px-3 py-2.5 font-medium">{p.name}</td>
-                    <td className="px-3 py-2.5 text-right font-mono tabular-nums">{p.score}</td>
+                    <td className="px-3 py-2.5 text-right font-mono tabular-nums">
+                      {p.score}
+                    </td>
                     <td className="px-5 py-2.5 text-right font-mono text-muted tabular-nums">
                       {p.ping}
                     </td>
