@@ -32,7 +32,7 @@ export type ServerTarget = {
 
 export const SERVERS: ServerTarget[] = [
   { id: "254", label: "GreenStone", host: "51.38.143.254", port: 7777 },
-  { id: "253", label: "GreenStone #2", host: "51.38.143.253", port: 7777 },
+  { id: "253", label: "GreenStone Beta", host: "51.38.143.253", port: 7777 },
 ];
 
 function packet(host: string, port: number, opcode: string) {
